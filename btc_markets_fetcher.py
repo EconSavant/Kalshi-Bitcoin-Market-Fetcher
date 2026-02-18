@@ -175,6 +175,154 @@ class MarketFetcher:
         
         return all_markets
     
+    def calculate_kalshi_fee(self, price_cents):
+        """Calculate Kalshi taker fee: 7% × p × (1-p)"""
+        p = price_cents / 100  # Convert cents to decimal probability
+        fee_rate = 0.07 * p * (1 - p)
+        return fee_rate * 100  # Return as cents
+    
+    def calculate_polymarket_fee(self, price, is_us=False):
+        """Calculate Polymarket fee (simplified to taker fee for comparison)"""
+        if is_us:
+            return price * 0.001  # 0.1% taker fee
+        else:
+            # For global, assume 2% on net profits (conservative estimate)
+            return price * 0.02
+    
+    def find_arbitrage_opportunities(self, min_profit_percent=1.0, use_us_poly_fee=False):
+        """
+        Find arbitrage opportunities between Kalshi and Polymarket
+        
+        Args:
+            min_profit_percent: Minimum profit percentage to report (default 1%)
+            use_us_poly_fee: Use US Polymarket fees (0.1%) instead of global (2%)
+        """
+        print("\n" + "="*80)
+        print("SEARCHING FOR ARBITRAGE OPPORTUNITIES")
+        print("="*80)
+        
+        markets = self.fetch_all_markets()
+        
+        # Organize markets by title/question for matching
+        kalshi_dict = {}
+        polymarket_dict = {}
+        
+        for market in markets:
+            if market['exchange'] == 'Kalshi':
+                # Use title as key (normalized)
+                key = market['title'].lower().strip()
+                kalshi_dict[key] = market
+            else:  # Polymarket
+                key = market['event_title'].lower().strip()
+                if key not in polymarket_dict:
+                    polymarket_dict[key] = []
+                polymarket_dict[key].append(market)
+        
+        opportunities = []
+        
+        # Try to find matching markets
+        print("\nAnalyzing price discrepancies...")
+        
+        for kalshi_key, kalshi_market in kalshi_dict.items():
+            for poly_key, poly_markets in polymarket_dict.items():
+                # Simple matching - check if keys are similar (contains similar words)
+                kalshi_words = set(kalshi_key.split())
+                poly_words = set(poly_key.split())
+                
+                # If there's significant word overlap, consider it a match
+                if len(kalshi_words & poly_words) >= 2 or kalshi_key in poly_key or poly_key in kalshi_key:
+                    for poly_market in poly_markets:
+                        # Get prices
+                        kalshi_yes_ask = kalshi_market.get('yes_ask')
+                        kalshi_no_ask = kalshi_market.get('no_ask')
+                        poly_yes = poly_market.get('yes_price')
+                        poly_no = poly_market.get('no_price')
+                        
+                        if not all([kalshi_yes_ask, kalshi_no_ask, poly_yes, poly_no]):
+                            continue
+                        
+                        # Convert Polymarket prices (0-1) to cents (0-100) for comparison
+                        poly_yes_cents = poly_yes * 100
+                        poly_no_cents = poly_no * 100
+                        
+                        # Strategy 1: Buy YES on Kalshi, Buy NO on Polymarket
+                        kalshi_yes_cost = kalshi_yes_ask
+                        kalshi_yes_fee = self.calculate_kalshi_fee(kalshi_yes_ask)
+                        poly_no_cost = poly_no_cents
+                        poly_no_fee = self.calculate_polymarket_fee(poly_no_cents, use_us_poly_fee)
+                        
+                        total_cost_1 = kalshi_yes_cost + kalshi_yes_fee + poly_no_cost + poly_no_fee
+                        profit_1 = 100 - total_cost_1  # Guaranteed payout is 100 cents
+                        profit_pct_1 = (profit_1 / total_cost_1) * 100 if total_cost_1 > 0 else 0
+                        
+                        # Strategy 2: Buy NO on Kalshi, Buy YES on Polymarket
+                        kalshi_no_cost = kalshi_no_ask
+                        kalshi_no_fee = self.calculate_kalshi_fee(kalshi_no_ask)
+                        poly_yes_cost = poly_yes_cents
+                        poly_yes_fee = self.calculate_polymarket_fee(poly_yes_cents, use_us_poly_fee)
+                        
+                        total_cost_2 = kalshi_no_cost + kalshi_no_fee + poly_yes_cost + poly_yes_fee
+                        profit_2 = 100 - total_cost_2
+                        profit_pct_2 = (profit_2 / total_cost_2) * 100 if total_cost_2 > 0 else 0
+                        
+                        # Check if either strategy is profitable
+                        if profit_pct_1 >= min_profit_percent:
+                            opportunities.append({
+                                'strategy': 'Buy YES on Kalshi, Buy NO on Polymarket',
+                                'kalshi_market': kalshi_market['title'],
+                                'kalshi_ticker': kalshi_market['ticker'],
+                                'poly_market': poly_market['event_title'],
+                                'kalshi_price': kalshi_yes_ask,
+                                'kalshi_fee': kalshi_yes_fee,
+                                'poly_price': poly_no_cents,
+                                'poly_fee': poly_no_fee,
+                                'total_cost': total_cost_1,
+                                'profit': profit_1,
+                                'profit_pct': profit_pct_1
+                            })
+                        
+                        if profit_pct_2 >= min_profit_percent:
+                            opportunities.append({
+                                'strategy': 'Buy NO on Kalshi, Buy YES on Polymarket',
+                                'kalshi_market': kalshi_market['title'],
+                                'kalshi_ticker': kalshi_market['ticker'],
+                                'poly_market': poly_market['event_title'],
+                                'kalshi_price': kalshi_no_ask,
+                                'kalshi_fee': kalshi_no_fee,
+                                'poly_price': poly_yes_cents,
+                                'poly_fee': poly_yes_fee,
+                                'total_cost': total_cost_2,
+                                'profit': profit_2,
+                                'profit_pct': profit_pct_2
+                            })
+        
+        # Sort by profit percentage
+        opportunities.sort(key=lambda x: x['profit_pct'], reverse=True)
+        
+        # Display results
+        print("\n" + "="*80)
+        if opportunities:
+            print(f"FOUND {len(opportunities)} ARBITRAGE OPPORTUNITIES")
+            print("="*80)
+            
+            for i, opp in enumerate(opportunities, 1):
+                print(f"\n#{i} - {opp['profit_pct']:.2f}% profit")
+                print(f"Strategy: {opp['strategy']}")
+                print(f"Kalshi:     {opp['kalshi_market'][:60]}")
+                print(f"            Ticker: {opp['kalshi_ticker']}")
+                print(f"            Price: {opp['kalshi_price']:.1f}¢ + Fee: {opp['kalshi_fee']:.2f}¢")
+                print(f"Polymarket: {opp['poly_market'][:60]}")
+                print(f"            Price: {opp['poly_price']:.1f}¢ + Fee: {opp['poly_fee']:.2f}¢")
+                print(f"Total Cost: {opp['total_cost']:.2f}¢")
+                print(f"Profit:     {opp['profit']:.2f}¢ ({opp['profit_pct']:.2f}%)")
+                print("-" * 80)
+        else:
+            print("NO PROFITABLE ARBITRAGE OPPORTUNITIES FOUND")
+            print(f"(Minimum profit threshold: {min_profit_percent}%)")
+            print("="*80)
+        
+        return opportunities
+    
     def save_to_json(self, markets, filename="btc_markets.json"):
         """Save markets to JSON file"""
         try:
@@ -294,13 +442,22 @@ def main():
     print("\nOptions:")
     print("1. Run once (fetch now and exit)")
     print("2. Run continuously (fetch every 15 minutes)")
+    print("3. Find arbitrage opportunities")
     
-    choice = input("\nEnter choice (1 or 2): ").strip()
+    choice = input("\nEnter choice (1, 2, or 3): ").strip()
     
     if choice == "1":
         fetcher.run_once()
     elif choice == "2":
         fetcher.run_continuous(interval_minutes=15)
+    elif choice == "3":
+        min_profit = input("Minimum profit % (default 1.0): ").strip()
+        min_profit = float(min_profit) if min_profit else 1.0
+        
+        use_us = input("Use US Polymarket fees? (y/n, default n): ").strip().lower()
+        use_us_fees = use_us == 'y'
+        
+        fetcher.find_arbitrage_opportunities(min_profit_percent=min_profit, use_us_poly_fee=use_us_fees)
     else:
         print("Invalid choice. Running once by default...")
         fetcher.run_once()
